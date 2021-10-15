@@ -8,6 +8,8 @@
 #include <cstring>
 #include <openssl/aes.h>
 #include <unistd.h>
+#include <unistd.h>
+
 using namespace std;
 
 #define ICMP_HEADER_LENGTH 8
@@ -112,35 +114,63 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
 
-        handle = pcap_open_live(default_device, BUFSIZ, 1, 1000, errbuf);
+        handle = pcap_open_live(default_device, BUFSIZ, 0, 1000, errbuf);
         if (handle == NULL)
         {
             fprintf(stderr, "Couldn't open device %s: %s\n", default_device, errbuf);
-            return (2);
+            return EXIT_FAILURE;
         }
         struct bpf_program compiled_filter_expression;
         if (pcap_compile(handle, &compiled_filter_expression, filter, 0, net) == -1)
         {
             fprintf(stderr, "Couldn't parse filter %s: %s\n", filter, pcap_geterr(handle));
-            return (2);
+            return EXIT_FAILURE;
         }
         if (pcap_setfilter(handle, &compiled_filter_expression) == -1)
         {
             fprintf(stderr, "Couldn't install filter %s: %s\n", filter, pcap_geterr(handle));
-            return (2);
+            return EXIT_FAILURE;
         }
 
         struct pcap_pkthdr header;
         const u_char *packet;
-        /* Grab a packet */
-		packet = pcap_next(handle, &header);
-		/* Print its length */
-		printf("Jacked a packet with length of [%d]\n", header.len);
-		/* And close the session */
-		pcap_close(handle);
+        string packet_data;
 
+        do
+        {
+            packet = pcap_next(handle, &header);
+            packet_data = string((char *)&packet[42]);
+        } while (packet_data != "Start transmission");
 
+        // TODO vytahnout data o odesilateli asi
 
+        packet = pcap_next(handle, &header);
+        // string recieved_file_name = string((char*)&packet[42]);
+        string recieved_file_name = "testovaci.txt";
+        ofstream dest_file(recieved_file_name, ios::out);
+
+        for(;;)
+        {
+            packet_data = "";
+            packet = NULL;
+            packet = pcap_next(handle, &header);
+            char* addr = (char*)packet;
+            addr[header.len] = '\0';
+            packet_data = string((char *)&packet[42]);
+            if(packet_data != "End")
+            {
+            dest_file << packet_data;
+            }
+            else
+            {
+                break;
+            }
+        }
+        dest_file.flush();
+        dest_file.close();
+
+        /* And close the session */
+        pcap_close(handle);
     }
 
     else // client
@@ -166,13 +196,29 @@ int main(int argc, char *argv[])
             cerr << "Failed to open socket" << endl;
             return EXIT_FAILURE;
         }
+        uint8_t *start_transmission_packet = create_icmp_packet((char *)"Start transmission", 18, ICMP_ECHO, packet_number++);
+        if (sendto(socket_descriptor, start_transmission_packet, ICMP_HEADER_LENGTH + 18, 0, (struct sockaddr *)&sin, sizeof(struct sockaddr)) <= 0)
+        {
+            cerr << "Failed sending packet" << endl;
+            return EXIT_FAILURE;
+        }
+
+        uint8_t *file_name_packet = create_icmp_packet((char *)file_arg.c_str(), file_arg.length(), ICMP_ECHO, packet_number++);
+        if (sendto(socket_descriptor, file_name_packet, ICMP_HEADER_LENGTH + file_arg.length(), 0, (struct sockaddr *)&sin, sizeof(struct sockaddr)) <= 0)
+        {
+            cerr << "Failed sending packet" << endl;
+            return EXIT_FAILURE;
+        }
 
         while (!source_file.eof())
         {
             source_file.read(buffer.data(), buffer.size());
             streamsize bytes_read = source_file.gcount();
 
-            vector<char> buffer_encrypted = encrypt_data(buffer);
+            // vector<char> buffer_encrypted = encrypt_data(buffer);
+
+            // vector<char> buffer_decrypted = decrypt_data(buffer_encrypted);
+
             uint8_t *icmp_echo_packet = create_icmp_packet(buffer.data(), bytes_read, ICMP_ECHO, packet_number++); // TODO change to encrypted buffer
 
             // TODO send packet via socket
@@ -183,10 +229,16 @@ int main(int argc, char *argv[])
                 return EXIT_FAILURE;
             }
 
-            // Close socket descriptor.
-
             delete icmp_echo_packet;
         }
+
+        uint8_t *end_transmission_packet = create_icmp_packet((char *)"End", 3, ICMP_ECHO, packet_number++);
+        if (sendto(socket_descriptor, end_transmission_packet, ICMP_HEADER_LENGTH + 3, 0, (struct sockaddr *)&sin, sizeof(struct sockaddr)) <= 0)
+        {
+            cerr << "Failed sending packet" << endl;
+            return EXIT_FAILURE;
+        }
+
         close(socket_descriptor);
         source_file.close();
     }
