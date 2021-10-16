@@ -9,10 +9,16 @@
 #include <openssl/aes.h>
 #include <unistd.h>
 #include <unistd.h>
+#include <sstream>
 
 using namespace std;
 
 #define ICMP_HEADER_LENGTH 8
+#define IPV4_HEADER_LENGTH 20
+#define ETHERNET_HEADER_LENGTH 14
+
+// TODO vyfiltrovat pouze packety, které jako destination moje ip
+// TODO vyřešit šifrování
 
 uint8_t *create_icmp_packet(char *data, int data_length, int icmp_packet_type, int packet_seq_num)
 {
@@ -57,6 +63,91 @@ vector<char> decrypt_data(vector<char> data)
     return decrypted_buffer;
 }
 
+// SERVER functions
+// returns default interface - should be first in interfaces list
+char *get_default_interface()
+{
+    pcap_if_t *interfaces;
+    char error_buffer[PCAP_ERRBUF_SIZE];
+    if (pcap_findalldevs(&interfaces, error_buffer) == -1)
+    {
+        cerr << error_buffer << endl;
+        return (char *)"";
+    }
+    return interfaces->name; // get first interface (default)
+}
+
+int set_pcap_filter(pcap_t *handle, char *interface, char *filter)
+{
+    // net and mask of device
+    bpf_u_int32 mask;
+    bpf_u_int32 net;
+    char error_buffer[PCAP_ERRBUF_SIZE];
+    if (pcap_lookupnet(interface, &net, &mask, error_buffer) < 0)
+    {
+        cerr << error_buffer << endl;
+        return EXIT_FAILURE;
+    }
+    struct bpf_program compiled_filter_expression;
+    if (pcap_compile(handle, &compiled_filter_expression, filter, 0, net) == -1)
+    {
+        cerr << "Filter parsing failed" << endl;
+        return EXIT_FAILURE;
+    }
+    if (pcap_setfilter(handle, &compiled_filter_expression) == -1)
+    {
+        cerr << "Filter application failed" << endl;
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
+}
+
+int recieve_file(char *interface)
+{
+    char error_buffer[PCAP_ERRBUF_SIZE];
+
+    // open device for sniffing
+    pcap_t *handle = pcap_open_live(interface, BUFSIZ, 0, 1000, error_buffer);
+    if (handle == NULL)
+    {
+        cerr << "Couldn't open device" << interface << ":" << error_buffer << endl;
+        return EXIT_FAILURE;
+    }
+
+    // set filter for ICMP packets
+    set_pcap_filter(handle, interface, (char *)"icmp");
+
+    int packet_header_length = ICMP_HEADER_LENGTH + IPV4_HEADER_LENGTH + ETHERNET_HEADER_LENGTH;
+    struct pcap_pkthdr header;
+    const char* packet_raw;
+    string packet_payload;
+    do
+    {
+        packet_raw = (const char*)pcap_next(handle, &header);
+        packet_payload = string(packet_raw+packet_header_length, packet_raw + header.len);   
+    } while (packet_payload.find("Start\n") == string::npos);
+    // open output file stream
+    ofstream dest_file(packet_payload.substr(6), ios::out); // skip Start\n
+    // write to file until end packet arrives
+    for (;;)
+    {
+        packet_raw = (const char*)pcap_next(handle, &header);
+        packet_payload = string(packet_raw+packet_header_length, packet_raw + header.len);
+        if (packet_payload!= "End")
+        {
+            dest_file << packet_payload;
+        }
+        else
+        {
+            break;
+        }
+    }
+    // close file and pcap device
+    dest_file.close();
+    pcap_close(handle);
+    return EXIT_SUCCESS;
+}
+
 int main(int argc, char *argv[])
 {
     // arguments parsing using getopt (-r <file> -s <ip|hostname> [-l])
@@ -87,90 +178,22 @@ int main(int argc, char *argv[])
             break;
         }
     }
-    // if (file_arg == "" || host == "")
-    // {
-    //     cerr << "-s and -r options are required" << endl;
-    //     return EXIT_FAILURE;
-    // }
+    // mozna nepovinne?
+    //  if (file_arg == "" || host == "")
+    //  {
+    //      cerr << "-s and -r options are required" << endl;
+    //      return EXIT_FAILURE;
+    //  }
+
     if (listen_mode) // server
     {
 
-        pcap_if_t *interfaces;
-        char filter[] = "icmp";
-        char errbuf[PCAP_ERRBUF_SIZE];
-        if (pcap_findalldevs(&interfaces, errbuf) == -1)
+        char *default_interface = get_default_interface();
+        if (default_interface == "")
         {
-            cerr << "error in pcap findall devs" << endl;
             return EXIT_FAILURE;
         }
-        char *default_device = interfaces->name; // get first interface (default)
-
-        pcap_t *handle;
-        bpf_u_int32 mask; /* The netmask of our sniffing device */
-        bpf_u_int32 net;  /* The IP of our sniffing device */
-        if (pcap_lookupnet(default_device, &net, &mask, errbuf) < 0)
-        {
-            printf("pcap_lookupnet: %s\n", errbuf);
-            return EXIT_FAILURE;
-        }
-
-        handle = pcap_open_live(default_device, BUFSIZ, 0, 1000, errbuf);
-        if (handle == NULL)
-        {
-            fprintf(stderr, "Couldn't open device %s: %s\n", default_device, errbuf);
-            return EXIT_FAILURE;
-        }
-        struct bpf_program compiled_filter_expression;
-        if (pcap_compile(handle, &compiled_filter_expression, filter, 0, net) == -1)
-        {
-            fprintf(stderr, "Couldn't parse filter %s: %s\n", filter, pcap_geterr(handle));
-            return EXIT_FAILURE;
-        }
-        if (pcap_setfilter(handle, &compiled_filter_expression) == -1)
-        {
-            fprintf(stderr, "Couldn't install filter %s: %s\n", filter, pcap_geterr(handle));
-            return EXIT_FAILURE;
-        }
-
-        struct pcap_pkthdr header;
-        const u_char *packet;
-        string packet_data;
-
-        do
-        {
-            packet = pcap_next(handle, &header);
-            packet_data = string((char *)&packet[42]);
-        } while (packet_data != "Start transmission");
-
-        // TODO vytahnout data o odesilateli asi
-
-        packet = pcap_next(handle, &header);
-        // string recieved_file_name = string((char*)&packet[42]);
-        string recieved_file_name = "testovaci.txt";
-        ofstream dest_file(recieved_file_name, ios::out);
-
-        for(;;)
-        {
-            packet_data = "";
-            packet = NULL;
-            packet = pcap_next(handle, &header);
-            char* addr = (char*)packet;
-            addr[header.len] = '\0';
-            packet_data = string((char *)&packet[42]);
-            if(packet_data != "End")
-            {
-            dest_file << packet_data;
-            }
-            else
-            {
-                break;
-            }
-        }
-        dest_file.flush();
-        dest_file.close();
-
-        /* And close the session */
-        pcap_close(handle);
+        recieve_file(default_interface);
     }
 
     else // client
@@ -196,19 +219,18 @@ int main(int argc, char *argv[])
             cerr << "Failed to open socket" << endl;
             return EXIT_FAILURE;
         }
-        uint8_t *start_transmission_packet = create_icmp_packet((char *)"Start transmission", 18, ICMP_ECHO, packet_number++);
-        if (sendto(socket_descriptor, start_transmission_packet, ICMP_HEADER_LENGTH + 18, 0, (struct sockaddr *)&sin, sizeof(struct sockaddr)) <= 0)
+        uint8_t *start_transmission_packet = create_icmp_packet((char *)(string("Start\n") + file_arg).c_str(), 6 + file_arg.length(), ICMP_ECHO, packet_number++);
+        if (sendto(socket_descriptor, start_transmission_packet, ICMP_HEADER_LENGTH + 6 + file_arg.length(), 0, (struct sockaddr *)&sin, sizeof(struct sockaddr)) <= 0)
         {
             cerr << "Failed sending packet" << endl;
             return EXIT_FAILURE;
         }
-
-        uint8_t *file_name_packet = create_icmp_packet((char *)file_arg.c_str(), file_arg.length(), ICMP_ECHO, packet_number++);
-        if (sendto(socket_descriptor, file_name_packet, ICMP_HEADER_LENGTH + file_arg.length(), 0, (struct sockaddr *)&sin, sizeof(struct sockaddr)) <= 0)
-        {
-            cerr << "Failed sending packet" << endl;
-            return EXIT_FAILURE;
-        }
+        // uint8_t *file_name_packet = create_icmp_packet((char *)file_arg.c_str(), file_arg.length(), ICMP_ECHO, packet_number++);
+        // if (sendto(socket_descriptor, file_name_packet, ICMP_HEADER_LENGTH + file_arg.length(), 0, (struct sockaddr *)&sin, sizeof(struct sockaddr)) <= 0)
+        // {
+        //     cerr << "Failed sending packet" << endl;
+        //     return EXIT_FAILURE;
+        // }
 
         while (!source_file.eof())
         {
