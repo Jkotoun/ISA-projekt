@@ -20,7 +20,7 @@ using namespace std;
 // TODO vyfiltrovat pouze packety, které jako destination moje ip
 // TODO vyřešit šifrování
 
-uint8_t *create_icmp_packet(char *data, int data_length, int icmp_packet_type, int packet_seq_num)
+char *create_icmp_packet(char *data, int data_length, int icmp_packet_type, int packet_seq_num)
 {
     // icmp header
     struct icmp icmp_header;
@@ -31,7 +31,7 @@ uint8_t *create_icmp_packet(char *data, int data_length, int icmp_packet_type, i
     icmp_header.icmp_cksum = 0;
 
     // allocate memory for packet (header + data)
-    uint8_t *packet = new uint8_t[ICMP_HEADER_LENGTH + data_length];
+    char *packet = new char[ICMP_HEADER_LENGTH + data_length];
     // copy header and data to allocated memory
     std::memcpy(packet, &icmp_header, ICMP_HEADER_LENGTH);
     std::memcpy(packet + ICMP_HEADER_LENGTH, data, data_length);
@@ -102,6 +102,45 @@ int set_pcap_filter(pcap_t *handle, char *interface, char *filter)
     return EXIT_SUCCESS;
 }
 
+string get_packet_payload(const u_char *packet_data, int packet_length)
+{
+    int packet_header_length = ICMP_HEADER_LENGTH + IPV4_HEADER_LENGTH + ETHERNET_HEADER_LENGTH;
+    return string(packet_data + packet_header_length, packet_data + packet_length);
+}
+
+int process_packets(pcap_t *handle)
+{
+    const u_char *packet_raw;
+    struct pcap_pkthdr packet_header;
+    string packet_payload;
+    // wait for start packet
+    do
+    {
+        packet_raw = pcap_next(handle, &packet_header);
+        packet_payload = get_packet_payload(packet_raw, packet_header.len);
+    } while (packet_payload.find("Start\n") == string::npos);
+
+    // open output file stream
+    ofstream dest_file(packet_payload.substr(6), ios::out); // skip Start\n
+    // write to file until end packet arrives
+    for (;;)
+    {
+        packet_raw = pcap_next(handle, &packet_header);
+        packet_payload = get_packet_payload(packet_raw, packet_header.len);
+        if (packet_payload != "End")
+        {
+            dest_file << packet_payload;
+        }
+        else
+        {
+            break;
+        }
+    }
+    // close file and pcap device
+    dest_file.close();
+    return EXIT_SUCCESS;
+}
+
 int recieve_file(char *interface)
 {
     char error_buffer[PCAP_ERRBUF_SIZE];
@@ -115,36 +154,79 @@ int recieve_file(char *interface)
     }
 
     // set filter for ICMP packets
-    set_pcap_filter(handle, interface, (char *)"icmp");
+    if (set_pcap_filter(handle, interface, (char *)"icmp") != EXIT_SUCCESS)
+    {
+        cerr << "Couldn't set filter" << endl;
+        return EXIT_FAILURE;
+    }
 
-    int packet_header_length = ICMP_HEADER_LENGTH + IPV4_HEADER_LENGTH + ETHERNET_HEADER_LENGTH;
-    struct pcap_pkthdr header;
-    const char* packet_raw;
-    string packet_payload;
-    do
+    if (process_packets(handle) != EXIT_SUCCESS)
     {
-        packet_raw = (const char*)pcap_next(handle, &header);
-        packet_payload = string(packet_raw+packet_header_length, packet_raw + header.len);   
-    } while (packet_payload.find("Start\n") == string::npos);
-    // open output file stream
-    ofstream dest_file(packet_payload.substr(6), ios::out); // skip Start\n
-    // write to file until end packet arrives
-    for (;;)
+        cerr << "Packet processing failed" << endl;
+        return EXIT_FAILURE;
+    }
+    pcap_close(handle);
+    return EXIT_SUCCESS;
+}
+
+sockaddr_in socket_address(string host)
+{
+    // TODO hostname to ip conversion
+    struct sockaddr_in sin;
+    memset(&sin, 0, sizeof(struct sockaddr_in));
+    sin.sin_family = AF_INET;
+    inet_pton(AF_INET, host.c_str(), &sin.sin_addr.s_addr);
+    return sin;
+}
+
+int send_icmp_packet(char *data, int sequence_number, int socket_descriptor, int data_length, sockaddr *socket_address)
+{
+
+    char *icmp_packet = create_icmp_packet(data, data_length, ICMP_ECHO, sequence_number);
+    if (sendto(socket_descriptor, icmp_packet, ICMP_HEADER_LENGTH + data_length, 0, socket_address, sizeof(struct sockaddr)) <= 0)
     {
-        packet_raw = (const char*)pcap_next(handle, &header);
-        packet_payload = string(packet_raw+packet_header_length, packet_raw + header.len);
-        if (packet_payload!= "End")
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
+}
+
+int send_file_via_icmp(string host, string filename)
+{
+
+    sockaddr_in sin = socket_address(host);
+    int packet_number = 0;
+
+    ifstream source_file(filename, ios::in);
+
+    int socket_descriptor;
+    if ((socket_descriptor = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)) < 0)
+    {
+        return EXIT_FAILURE;
+    }
+    // 6 = length of Start\n
+    if (send_icmp_packet((char *)(string("Start\n") + filename).c_str(), packet_number++, socket_descriptor, filename.length() + 6, (struct sockaddr *)&sin) != EXIT_SUCCESS)
+    {
+        return EXIT_FAILURE;
+    }
+
+    vector<char> buffer(1000);
+    while (!source_file.eof())
+    {
+        source_file.read(buffer.data(), buffer.size());
+        streamsize bytes_read = source_file.gcount();
+        if (send_icmp_packet(buffer.data(), packet_number++, socket_descriptor, bytes_read, (struct sockaddr *)&sin) != EXIT_SUCCESS)
         {
-            dest_file << packet_payload;
-        }
-        else
-        {
-            break;
+            return EXIT_FAILURE;
         }
     }
-    // close file and pcap device
-    dest_file.close();
-    pcap_close(handle);
+
+    if (send_icmp_packet((char *)"End", packet_number++, socket_descriptor, 3, (struct sockaddr *)&sin) != EXIT_SUCCESS)
+    {
+        return EXIT_FAILURE;
+    }
+
+    close(socket_descriptor);
+    source_file.close();
     return EXIT_SUCCESS;
 }
 
@@ -193,76 +275,20 @@ int main(int argc, char *argv[])
         {
             return EXIT_FAILURE;
         }
-        recieve_file(default_interface);
+        if (recieve_file(default_interface) != EXIT_SUCCESS)
+        {
+
+            return EXIT_FAILURE;
+        }
     }
 
     else // client
     {
-        int packet_number = 0;
-        ifstream source_file(file_arg, ios::in);
-        vector<char> buffer(1000);
-
-        struct sockaddr_in sin;
-        memset(&sin, 0, sizeof(struct sockaddr_in));
-        sin.sin_family = AF_INET;
-
-        int status;
-        if (inet_pton(AF_INET, host.c_str(), &sin.sin_addr.s_addr) != 1)
+        if (send_file_via_icmp(host, file_arg) != EXIT_SUCCESS)
         {
-            cerr << "can't convert ip to in_addr format" << endl;
+            cerr << "Sending packet via icmp failed" << endl;
             return EXIT_FAILURE;
         }
-
-        int socket_descriptor;
-        if ((socket_descriptor = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)) < 0)
-        {
-            cerr << "Failed to open socket" << endl;
-            return EXIT_FAILURE;
-        }
-        uint8_t *start_transmission_packet = create_icmp_packet((char *)(string("Start\n") + file_arg).c_str(), 6 + file_arg.length(), ICMP_ECHO, packet_number++);
-        if (sendto(socket_descriptor, start_transmission_packet, ICMP_HEADER_LENGTH + 6 + file_arg.length(), 0, (struct sockaddr *)&sin, sizeof(struct sockaddr)) <= 0)
-        {
-            cerr << "Failed sending packet" << endl;
-            return EXIT_FAILURE;
-        }
-        // uint8_t *file_name_packet = create_icmp_packet((char *)file_arg.c_str(), file_arg.length(), ICMP_ECHO, packet_number++);
-        // if (sendto(socket_descriptor, file_name_packet, ICMP_HEADER_LENGTH + file_arg.length(), 0, (struct sockaddr *)&sin, sizeof(struct sockaddr)) <= 0)
-        // {
-        //     cerr << "Failed sending packet" << endl;
-        //     return EXIT_FAILURE;
-        // }
-
-        while (!source_file.eof())
-        {
-            source_file.read(buffer.data(), buffer.size());
-            streamsize bytes_read = source_file.gcount();
-
-            // vector<char> buffer_encrypted = encrypt_data(buffer);
-
-            // vector<char> buffer_decrypted = decrypt_data(buffer_encrypted);
-
-            uint8_t *icmp_echo_packet = create_icmp_packet(buffer.data(), bytes_read, ICMP_ECHO, packet_number++); // TODO change to encrypted buffer
-
-            // TODO send packet via socket
-
-            if (sendto(socket_descriptor, icmp_echo_packet, ICMP_HEADER_LENGTH + bytes_read, 0, (struct sockaddr *)&sin, sizeof(struct sockaddr)) <= 0)
-            {
-                cerr << "Failed sending packet" << endl;
-                return EXIT_FAILURE;
-            }
-
-            delete icmp_echo_packet;
-        }
-
-        uint8_t *end_transmission_packet = create_icmp_packet((char *)"End", 3, ICMP_ECHO, packet_number++);
-        if (sendto(socket_descriptor, end_transmission_packet, ICMP_HEADER_LENGTH + 3, 0, (struct sockaddr *)&sin, sizeof(struct sockaddr)) <= 0)
-        {
-            cerr << "Failed sending packet" << endl;
-            return EXIT_FAILURE;
-        }
-
-        close(socket_descriptor);
-        source_file.close();
     }
 
     return 0;
