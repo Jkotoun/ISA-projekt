@@ -19,9 +19,9 @@ using namespace std;
 #define ETHERNET_HEADER_LENGTH 14
 
 // TODO vyfiltrovat pouze packety, které jako destination moje ip
-//TODO ipv6
+// TODO ipv6
 
-char *create_icmp_packet(char *data, int data_length, int packet_seq_num, sa_family_t ipfamily)
+char *create_icmp_packet(char *data, int data_length, sa_family_t ipfamily)
 {
     // allocate memory for packet (header + data)
     char *packet = new char[ICMP_HEADER_LENGTH + data_length];
@@ -30,7 +30,6 @@ char *create_icmp_packet(char *data, int data_length, int packet_seq_num, sa_fam
         struct icmp icmp_header;
         icmp_header.icmp_code = ICMP_ECHO;
         icmp_header.icmp_type = ICMP_ECHO;
-        icmp_header.icmp_seq = htons(packet_seq_num);
         icmp_header.icmp_cksum = 0;
         std::memcpy(packet, &icmp_header, ICMP_HEADER_LENGTH);
         std::memcpy(packet + ICMP_HEADER_LENGTH, data, data_length);
@@ -45,10 +44,8 @@ char *create_icmp_packet(char *data, int data_length, int packet_seq_num, sa_fam
     //     std::memcpy(packet, &icmp_header, 4);
     //     std::memcpy(packet + 4, data, data_length);
     // }
-    
-    
+
     // copy header and data to allocated memory
-    
 
     return packet;
 }
@@ -136,28 +133,41 @@ string get_packet_payload(const u_char *packet_data, int packet_length)
     return string(packet_data + packet_header_length, packet_data + packet_length);
 }
 
-int process_packets(pcap_t *handle)
+int process_packets(pcap_t *handle, char *interface)
 {
     const u_char *packet_raw;
     struct pcap_pkthdr packet_header;
     string packet_payload;
+    string packet_payload_decrypted;
+
     // wait for start packet
     do
     {
         packet_raw = pcap_next(handle, &packet_header);
         packet_payload = get_packet_payload(packet_raw, packet_header.len);
-    } while (packet_payload.find("Start\n") == string::npos);
+        packet_payload_decrypted = string(decrypt_data(vector<char>(packet_payload.begin(), packet_payload.end()), packet_payload.length()).data());
+    } while (packet_payload_decrypted.find("Start\n") == string::npos);
 
+    char *src_ip = inet_ntoa(((struct ip *)(packet_raw + ETHERNET_HEADER_LENGTH))->ip_src);
+
+    // process only icmp packets from sender
+    string filter = "src " + string(src_ip);
+    if (set_pcap_filter(handle, interface, (char *)filter.c_str()) != EXIT_SUCCESS)
+    {
+        cerr << "Couldn't set filter" << endl;
+        return EXIT_FAILURE;
+    }
     // open output file stream
-    ofstream dest_file(packet_payload.substr(6), ios::out); // skip Start\n
+    ofstream dest_file(packet_payload_decrypted.substr(6), ios::out); // skip Start\n
     // write to file until end packet arrives
     for (;;)
     {
         packet_raw = pcap_next(handle, &packet_header);
         packet_payload = get_packet_payload(packet_raw, packet_header.len);
-        if (packet_payload != "End")
+        string packet_payload_decrypted = string(decrypt_data(vector<char>(packet_payload.begin(), packet_payload.end()), packet_payload.length()).data());
+        if (packet_payload_decrypted != "End")
         {
-            dest_file << decrypt_data(vector<char>(packet_payload.begin(), packet_payload.end()), packet_payload.length()).data();
+            dest_file << packet_payload_decrypted;
         }
         else
         {
@@ -188,7 +198,7 @@ int recieve_file(char *interface)
         return EXIT_FAILURE;
     }
 
-    if (process_packets(handle) != EXIT_SUCCESS)
+    if (process_packets(handle, interface) != EXIT_SUCCESS)
     {
         cerr << "Packet processing failed" << endl;
         return EXIT_FAILURE;
@@ -197,20 +207,18 @@ int recieve_file(char *interface)
     return EXIT_SUCCESS;
 }
 
-int send_icmp_packet(char *data, int sequence_number, int socket_descriptor, int data_length, sockaddr *socket_address)
+int send_icmp_packet(char *data, int socket_descriptor, int data_length, sockaddr *socket_address)
 {
-    char *icmp_packet = create_icmp_packet(data, data_length, sequence_number, socket_address->sa_family);
+    char *icmp_packet = create_icmp_packet(data, data_length, socket_address->sa_family);
     if (sendto(socket_descriptor, icmp_packet, ICMP_HEADER_LENGTH + data_length, 0, socket_address, sizeof(struct sockaddr)) <= 0)
     {
         return EXIT_FAILURE;
     }
-    cout << "jo" << endl;
     return EXIT_SUCCESS;
 }
 
 int send_file_via_icmp(addrinfo *server_info, string filename)
 {
-    int packet_number = 0;
     ifstream source_file(filename, ios::in);
     int socket_descriptor;
     int type;
@@ -226,8 +234,13 @@ int send_file_via_icmp(addrinfo *server_info, string filename)
     {
         return EXIT_FAILURE;
     }
+
+    string start_str = string("Start\n") + filename;
+    vector<char> start_message(start_str.begin(), start_str.end());
+    vector<char> encrypted_start_message = encrypt_data(start_message, start_message.size());
+
     // 6 = length of Start\n
-    if (send_icmp_packet((char *)(string("Start\n") + filename).c_str(), packet_number++, socket_descriptor, filename.length() + 6, server_info->ai_addr) != EXIT_SUCCESS)
+    if (send_icmp_packet(encrypted_start_message.data(), socket_descriptor, encrypted_start_message.size(), server_info->ai_addr) != EXIT_SUCCESS)
     {
         return EXIT_FAILURE;
     }
@@ -240,12 +253,14 @@ int send_file_via_icmp(addrinfo *server_info, string filename)
         buffer.shrink_to_fit();
         streamsize bytes_read = source_file.gcount();
         vector<char> buffer_encrypted = encrypt_data(buffer, bytes_read);
-        if (send_icmp_packet(buffer_encrypted.data(), packet_number++, socket_descriptor, buffer_encrypted.size(), server_info->ai_addr) != EXIT_SUCCESS)
+        if (send_icmp_packet(buffer_encrypted.data(), socket_descriptor, buffer_encrypted.size(), server_info->ai_addr) != EXIT_SUCCESS)
         {
             return EXIT_FAILURE;
         }
     }
-    if (send_icmp_packet((char *)"End", packet_number++, socket_descriptor, 3, server_info->ai_addr) != EXIT_SUCCESS)
+    vector<char> end_message = {'E', 'n', 'd'};
+    vector<char> encrypted_end_message = encrypt_data(end_message, 3);
+    if (send_icmp_packet(encrypted_end_message.data(), socket_descriptor, encrypted_end_message.size(), server_info->ai_addr) != EXIT_SUCCESS)
     {
         return EXIT_FAILURE;
     }
@@ -299,10 +314,12 @@ int main(int argc, char *argv[])
         {
             return EXIT_FAILURE;
         }
-        if (recieve_file(default_interface) != EXIT_SUCCESS)
+        while (true)
         {
-
-            return EXIT_FAILURE;
+            if (recieve_file(default_interface) != EXIT_SUCCESS)
+            {
+                return EXIT_FAILURE;
+            }
         }
     }
     else // client
