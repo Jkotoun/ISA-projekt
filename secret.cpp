@@ -5,6 +5,7 @@
 #include <vector>
 #include <pcap.h>
 #include <netinet/ip_icmp.h>
+#include <netinet/icmp6.h>
 #include <cstring>
 #include <openssl/aes.h>
 #include <unistd.h>
@@ -18,48 +19,75 @@ using namespace std;
 #define ETHERNET_HEADER_LENGTH 14
 
 // TODO vyfiltrovat pouze packety, které jako destination moje ip
-// TODO vyřešit šifrování
+//TODO ipv6
 
-char *create_icmp_packet(char *data, int data_length, int icmp_packet_type, int packet_seq_num)
+char *create_icmp_packet(char *data, int data_length, int packet_seq_num, sa_family_t ipfamily)
 {
-    // icmp header
-    struct icmp icmp_header;
-    icmp_header.icmp_type = icmp_packet_type;
-    icmp_header.icmp_code = 0;
-    icmp_header.icmp_id = htons(99);
-    icmp_header.icmp_seq = htons(packet_seq_num);
-    icmp_header.icmp_cksum = 0;
-
     // allocate memory for packet (header + data)
     char *packet = new char[ICMP_HEADER_LENGTH + data_length];
+    if (ipfamily == AF_INET) // ipv4
+    {
+        struct icmp icmp_header;
+        icmp_header.icmp_code = ICMP_ECHO;
+        icmp_header.icmp_type = ICMP_ECHO;
+        icmp_header.icmp_seq = htons(packet_seq_num);
+        icmp_header.icmp_cksum = 0;
+        std::memcpy(packet, &icmp_header, ICMP_HEADER_LENGTH);
+        std::memcpy(packet + ICMP_HEADER_LENGTH, data, data_length);
+    }
+    // else
+    // {
+
+    //     struct icmp6_hdr icmp_header;
+    //     icmp_header.icmp6_cksum = 0;
+    //     icmp_header.icmp6_code = ICMP6_ECHO_REQUEST;
+    //     icmp_header.icmp6_type = ICMP6_ECHO_REQUEST;
+    //     std::memcpy(packet, &icmp_header, 4);
+    //     std::memcpy(packet + 4, data, data_length);
+    // }
+    
+    
     // copy header and data to allocated memory
-    std::memcpy(packet, &icmp_header, ICMP_HEADER_LENGTH);
-    std::memcpy(packet + ICMP_HEADER_LENGTH, data, data_length);
+    
 
     return packet;
 }
 
-vector<char> encrypt_data(vector<char> data)
+vector<char> encrypt_data(vector<char> data, int data_bytes)
 {
-    vector<char> encrypted_buffer(1000);
+
+    vector<char> encrypted_buffer(data_bytes);
+    data.resize(data.size() + (16 - data.size() % 16) % 16, 0);
+    encrypted_buffer.resize(encrypted_buffer.size() + (16 - encrypted_buffer.size() % 16) % 16, 0);
     AES_KEY aes_key;
     if (AES_set_encrypt_key((unsigned char *)"xkotou06", 128, &aes_key) != 0)
     {
         exit(EXIT_FAILURE); // error handling
     }
-    AES_encrypt((unsigned char *)data.data(), (unsigned char *)encrypted_buffer.data(), &aes_key);
+    int i = 0;
+    while (i < data_bytes)
+    {
+
+        AES_encrypt((unsigned char *)&data.data()[i], (unsigned char *)&encrypted_buffer.data()[i], &aes_key);
+        i += 16;
+    }
     return encrypted_buffer;
 }
 
-vector<char> decrypt_data(vector<char> data)
+vector<char> decrypt_data(vector<char> data, int data_size)
 {
-    vector<char> decrypted_buffer(1000);
+    vector<char> decrypted_buffer(data_size, 0);
     AES_KEY aes_key;
     if (AES_set_decrypt_key((unsigned char *)"xkotou06", 128, &aes_key) != 0)
     {
         exit(EXIT_FAILURE); // error handling
     }
-    AES_decrypt((unsigned char *)data.data(), (unsigned char *)decrypted_buffer.data(), &aes_key);
+    int i = 0;
+    while (i < data_size)
+    {
+        AES_decrypt((unsigned char *)&data.data()[i], (unsigned char *)&decrypted_buffer.data()[i], &aes_key);
+        i += 16;
+    }
     return decrypted_buffer;
 }
 
@@ -129,7 +157,7 @@ int process_packets(pcap_t *handle)
         packet_payload = get_packet_payload(packet_raw, packet_header.len);
         if (packet_payload != "End")
         {
-            dest_file << packet_payload;
+            dest_file << decrypt_data(vector<char>(packet_payload.begin(), packet_payload.end()), packet_payload.length()).data();
         }
         else
         {
@@ -154,7 +182,7 @@ int recieve_file(char *interface)
     }
 
     // set filter for ICMP packets
-    if (set_pcap_filter(handle, interface, (char *)"icmp") != EXIT_SUCCESS)
+    if (set_pcap_filter(handle, interface, (char *)"icmp or icmp6") != EXIT_SUCCESS)
     {
         cerr << "Couldn't set filter" << endl;
         return EXIT_FAILURE;
@@ -169,62 +197,58 @@ int recieve_file(char *interface)
     return EXIT_SUCCESS;
 }
 
-sockaddr_in socket_address(string host)
-{
-    // TODO hostname to ip conversion
-    struct sockaddr_in sin;
-    memset(&sin, 0, sizeof(struct sockaddr_in));
-    sin.sin_family = AF_INET;
-    inet_pton(AF_INET, host.c_str(), &sin.sin_addr.s_addr);
-    return sin;
-}
-
 int send_icmp_packet(char *data, int sequence_number, int socket_descriptor, int data_length, sockaddr *socket_address)
 {
-
-    char *icmp_packet = create_icmp_packet(data, data_length, ICMP_ECHO, sequence_number);
+    char *icmp_packet = create_icmp_packet(data, data_length, sequence_number, socket_address->sa_family);
     if (sendto(socket_descriptor, icmp_packet, ICMP_HEADER_LENGTH + data_length, 0, socket_address, sizeof(struct sockaddr)) <= 0)
     {
         return EXIT_FAILURE;
     }
+    cout << "jo" << endl;
     return EXIT_SUCCESS;
 }
 
-int send_file_via_icmp(string host, string filename)
+int send_file_via_icmp(addrinfo *server_info, string filename)
 {
-
-    sockaddr_in sin = socket_address(host);
     int packet_number = 0;
-
     ifstream source_file(filename, ios::in);
-
     int socket_descriptor;
-    if ((socket_descriptor = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)) < 0)
+    int type;
+    if (server_info->ai_family == AF_INET)
+    {
+        type = IPPROTO_ICMP;
+    }
+    else
+    {
+        type = IPPROTO_ICMPV6;
+    }
+    if ((socket_descriptor = socket(server_info->ai_family, server_info->ai_socktype, type)) < 0)
     {
         return EXIT_FAILURE;
     }
     // 6 = length of Start\n
-    if (send_icmp_packet((char *)(string("Start\n") + filename).c_str(), packet_number++, socket_descriptor, filename.length() + 6, (struct sockaddr *)&sin) != EXIT_SUCCESS)
+    if (send_icmp_packet((char *)(string("Start\n") + filename).c_str(), packet_number++, socket_descriptor, filename.length() + 6, server_info->ai_addr) != EXIT_SUCCESS)
     {
         return EXIT_FAILURE;
     }
-
-    vector<char> buffer(1000);
+    vector<char> buffer(1400);
     while (!source_file.eof())
     {
+        buffer.clear();
+        buffer.resize(1400);
         source_file.read(buffer.data(), buffer.size());
+        buffer.shrink_to_fit();
         streamsize bytes_read = source_file.gcount();
-        if (send_icmp_packet(buffer.data(), packet_number++, socket_descriptor, bytes_read, (struct sockaddr *)&sin) != EXIT_SUCCESS)
+        vector<char> buffer_encrypted = encrypt_data(buffer, bytes_read);
+        if (send_icmp_packet(buffer_encrypted.data(), packet_number++, socket_descriptor, buffer_encrypted.size(), server_info->ai_addr) != EXIT_SUCCESS)
         {
             return EXIT_FAILURE;
         }
     }
-
-    if (send_icmp_packet((char *)"End", packet_number++, socket_descriptor, 3, (struct sockaddr *)&sin) != EXIT_SUCCESS)
+    if (send_icmp_packet((char *)"End", packet_number++, socket_descriptor, 3, server_info->ai_addr) != EXIT_SUCCESS)
     {
         return EXIT_FAILURE;
     }
-
     close(socket_descriptor);
     source_file.close();
     return EXIT_SUCCESS;
@@ -281,10 +305,19 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
     }
-
     else // client
     {
-        if (send_file_via_icmp(host, file_arg) != EXIT_SUCCESS)
+        struct addrinfo hints, *server_info;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_RAW;
+        if (getaddrinfo(host.c_str(), NULL, &hints, &server_info) != 0)
+        {
+            cerr << "Failed getting address info" << endl;
+            return EXIT_FAILURE;
+        }
+
+        if (send_file_via_icmp(server_info, file_arg) != EXIT_SUCCESS)
         {
             cerr << "Sending packet via icmp failed" << endl;
             return EXIT_FAILURE;
