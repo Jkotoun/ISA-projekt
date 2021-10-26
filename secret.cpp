@@ -9,8 +9,10 @@
 #include <cstring>
 #include <openssl/aes.h>
 #include <unistd.h>
-#include <unistd.h>
 #include <sstream>
+
+
+
 
 using namespace std;
 
@@ -139,14 +141,14 @@ int process_packets(pcap_t *handle, char *interface)
     struct pcap_pkthdr packet_header;
     string packet_payload;
     string packet_payload_decrypted;
-
     // wait for start packet
     do
     {
         packet_raw = pcap_next(handle, &packet_header);
+     
         packet_payload = get_packet_payload(packet_raw, packet_header.len);
-        packet_payload_decrypted = string(decrypt_data(vector<char>(packet_payload.begin(), packet_payload.end()), packet_payload.length()).data());
-    } while (packet_payload_decrypted.find("Start\n") == string::npos);
+       // packet_payload_decrypted = string(decrypt_data(vector<char>(packet_payload.begin(), packet_payload.end()), packet_payload.length()).data());
+    } while (packet_payload.find("Start\n") == string::npos);
 
     char *src_ip = inet_ntoa(((struct ip *)(packet_raw + ETHERNET_HEADER_LENGTH))->ip_src);
 
@@ -157,20 +159,31 @@ int process_packets(pcap_t *handle, char *interface)
         cerr << "Couldn't set filter" << endl;
         return EXIT_FAILURE;
     }
-    // open output file stream
-    ofstream dest_file(packet_payload_decrypted.substr(6), ios::out); // skip Start\n
+    
     // write to file until end packet arrives
+    int i = 0;        
+     ofstream dest_file(packet_payload.substr(6), ios::out);
     for (;;)
     {
+        cout<<i++<<endl;       
         packet_raw = pcap_next(handle, &packet_header);
         packet_payload = get_packet_payload(packet_raw, packet_header.len);
-        string packet_payload_decrypted = string(decrypt_data(vector<char>(packet_payload.begin(), packet_payload.end()), packet_payload.length()).data());
-        if (packet_payload_decrypted != "End")
+       
+       // packet_payload_decrypted = string(decrypt_data(vector<char>(packet_payload.begin(), packet_payload.end()), packet_payload.length()).data());
+        //cout<<"packet len:"<<packet_payload_decrypted.length()<<endl;
+       // cout<<packet_payload<<endl;
+        if (packet_payload != "End")
         {
-            dest_file << packet_payload_decrypted;
+          //  cout<<file_name<<endl;
+        
+            //cout<<"length: "<<packet_payload_decrypted.length()<<endl;
+            dest_file << packet_payload;
+            dest_file.flush();
+          
         }
         else
         {
+            cout<<"konec"<<endl;
             break;
         }
     }
@@ -240,27 +253,32 @@ int send_file_via_icmp(addrinfo *server_info, string filename)
     vector<char> encrypted_start_message = encrypt_data(start_message, start_message.size());
 
     // 6 = length of Start\n
-    if (send_icmp_packet(encrypted_start_message.data(), socket_descriptor, encrypted_start_message.size(), server_info->ai_addr) != EXIT_SUCCESS)
+    if (send_icmp_packet(start_message.data(), socket_descriptor, start_message.size(), server_info->ai_addr) != EXIT_SUCCESS)
     {
         return EXIT_FAILURE;
     }
     vector<char> buffer(1400);
+    int j =0; 
     while (!source_file.eof())
     {
+        cout<<j++<<endl;
+    
         buffer.clear();
         buffer.resize(1400);
         source_file.read(buffer.data(), buffer.size());
         buffer.shrink_to_fit();
         streamsize bytes_read = source_file.gcount();
         vector<char> buffer_encrypted = encrypt_data(buffer, bytes_read);
-        if (send_icmp_packet(buffer_encrypted.data(), socket_descriptor, buffer_encrypted.size(), server_info->ai_addr) != EXIT_SUCCESS)
+
+        usleep(1000);
+        if (send_icmp_packet(buffer.data(), socket_descriptor, buffer.size(), server_info->ai_addr) != EXIT_SUCCESS)
         {
             return EXIT_FAILURE;
         }
     }
     vector<char> end_message = {'E', 'n', 'd'};
     vector<char> encrypted_end_message = encrypt_data(end_message, 3);
-    if (send_icmp_packet(encrypted_end_message.data(), socket_descriptor, encrypted_end_message.size(), server_info->ai_addr) != EXIT_SUCCESS)
+    if (send_icmp_packet(end_message.data(), socket_descriptor, end_message.size(), server_info->ai_addr) != EXIT_SUCCESS)
     {
         return EXIT_FAILURE;
     }
