@@ -223,11 +223,11 @@ int recieve_file(char *interface)
     return EXIT_SUCCESS;
 }
 
-int send_icmp_packet(char *data, int socket_descriptor, int data_length, int packet_sequence_number, sockaddr *socket_address)
+int send_icmp_packet(char *data, int socket_descriptor, int data_length, int packet_sequence_number, addrinfo *servinfo)
 {
-    char *icmp_packet = create_icmp_packet(data, packet_sequence_number, data_length, socket_address->sa_family);
-    if (sendto(socket_descriptor, icmp_packet, ICMP_HEADER_LENGTH + data_length, 0, socket_address, sizeof(struct sockaddr)) <= 0)
-    {
+    char *icmp_packet = create_icmp_packet(data, packet_sequence_number, data_length, servinfo->ai_family);
+
+    if (sendto(socket_descriptor, icmp_packet, ICMP_HEADER_LENGTH + data_length, 0, (struct sockaddr*)(servinfo->ai_addr), servinfo->ai_addrlen) <= 0)    {
         return EXIT_FAILURE;
     }
     return EXIT_SUCCESS;
@@ -256,7 +256,7 @@ int send_file_via_icmp(addrinfo *server_info, string filename)
 
     // 6 = length of Start\n
     int packet_sequence_number = 0;
-    if (send_icmp_packet(start_message.data(), socket_descriptor, start_message.size(), packet_sequence_number++, server_info->ai_addr) != EXIT_SUCCESS)
+    if (send_icmp_packet(start_message.data(), socket_descriptor, start_message.size(), packet_sequence_number++, server_info) != EXIT_SUCCESS)
     {
         return EXIT_FAILURE;
     }
@@ -271,14 +271,14 @@ int send_file_via_icmp(addrinfo *server_info, string filename)
         buffer.resize(bytes_read);
         vector<char> buffer_encrypted = encrypt_data(buffer, bytes_read);
         usleep(1000);
-        if (send_icmp_packet(buffer.data(), socket_descriptor, buffer.size(), packet_sequence_number++, server_info->ai_addr) != EXIT_SUCCESS)
+        if (send_icmp_packet(buffer.data(), socket_descriptor, buffer.size(), packet_sequence_number++, server_info) != EXIT_SUCCESS)
         {
             return EXIT_FAILURE;
         }
     }
     vector<char> end_message = {'E', 'n', 'd'};
     vector<char> encrypted_end_message = encrypt_data(end_message, 3);
-    if (send_icmp_packet(end_message.data(), socket_descriptor, end_message.size(), packet_sequence_number++, server_info->ai_addr) != EXIT_SUCCESS)
+    if (send_icmp_packet(end_message.data(), socket_descriptor, end_message.size(), packet_sequence_number++, server_info) != EXIT_SUCCESS)
     {
         return EXIT_FAILURE;
     }
