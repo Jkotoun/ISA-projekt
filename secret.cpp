@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <sstream>
 #include <netinet/if_ether.h>
+#include <netinet/ip6.h>
 using namespace std;
 
 #define ICMP_HEADER_LENGTH 8
@@ -162,9 +163,15 @@ int process_packets(pcap_t *handle, char *interface)
         // decrypted_vector = decrypt_data(vector<char>(packet_payload.begin(), packet_payload.end()), packet_payload.length());
         // packet_payload_decrypted = string(decrypted_vector.begin(), decrypted_vector.end());
     } while (packet_payload.find("Start\n") == string::npos);
-
-    char *src_ip = inet_ntoa(((struct ip *)(packet_raw + ETHERNET_HEADER_LENGTH))->ip_src);
-
+    char src_ip[100];
+    if (eth_type == ETHERTYPE_IP) // ipv4
+    {
+        inet_ntop(AF_INET, &((struct ip *)(packet_raw + ETHERNET_HEADER_LENGTH))->ip_src, src_ip, 100);
+    }
+    else if (eth_type == ETHERTYPE_IPV6)
+    {
+        inet_ntop(AF_INET6,&((struct ip6_hdr*)(packet_raw+ETHERNET_HEADER_LENGTH))->ip6_src, src_ip, 100);
+    }
     // process only icmp packets from sender
     string filter = "(icmp or icmp6) and src " + string(src_ip);
     if (set_pcap_filter(handle, interface, (char *)filter.c_str()) != EXIT_SUCCESS)
