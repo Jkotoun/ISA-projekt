@@ -179,26 +179,26 @@ int process_packets(pcap_t *handle, char *interface)
         eptr = (struct ether_header *)packet_raw;
         eth_type = ntohs(eptr->ether_type);
         
-        packet_payload = get_packet_payload(packet_raw, packet_header.len, 0x0800);
+        packet_payload = get_packet_payload(packet_raw, packet_header.len, eth_type);
         decrypted_vector = decrypt_data(vector<char>(packet_payload.begin(), packet_payload.end()), packet_payload.length());
         packet_payload_decrypted = string(decrypted_vector.begin(), decrypted_vector.end());
     } while (packet_payload_decrypted.find("Start\n") == string::npos);
-    // char src_ip[100];
-    //  if (eth_type == ETHERTYPE_IP) // ipv4
-    // {
-    //     inet_ntop(AF_INET, &((struct ip *)(packet_raw + ETHERNET_HEADER_LENGTH))->ip_src, src_ip, 100);
-    // }
-    // else if (eth_type == ETHERTYPE_IPV6)
-    // {
-    //     inet_ntop(AF_INET6,&((struct ip6_hdr*)(packet_raw+ETHERNET_HEADER_LENGTH))->ip6_src, src_ip, 100);
-    // }
-    // // process only icmp packets from sender
-    // string filter = "(icmp or icmp6) and src " + string(src_ip);
-    // if (set_pcap_filter(handle, interface, (char *)filter.c_str()) != EXIT_SUCCESS)
-    // {
-    //     cerr << "Couldn't set filter" << endl;
-    //     return EXIT_FAILURE;
-    // }
+    char src_ip[100];
+     if (eth_type == ETHERTYPE_IP) // ipv4
+    {
+        inet_ntop(AF_INET, &((struct ip *)(packet_raw + ETHERNET_HEADER_LENGTH))->ip_src, src_ip, 100);
+    }
+    else if (eth_type == ETHERTYPE_IPV6)
+    {
+        inet_ntop(AF_INET6,&((struct ip6_hdr*)(packet_raw+ETHERNET_HEADER_LENGTH))->ip6_src, src_ip, 100);
+    }
+    // process only icmp packets from sender
+    string filter = "(icmp or icmp6) and src " + string(src_ip);
+    if (set_pcap_filter(handle, interface, (char *)filter.c_str()) != EXIT_SUCCESS)
+    {
+        cerr << "Couldn't set filter" << endl;
+        return EXIT_FAILURE;
+    }
 
     // write to file until end packet arrives
     int bytes_sum = 0;
