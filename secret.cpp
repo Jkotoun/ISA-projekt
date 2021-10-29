@@ -9,10 +9,9 @@
 #include <cstring>
 #include <openssl/aes.h>
 #include <unistd.h>
-#include <sstream>
 #include <netinet/if_ether.h>
 #include <netinet/ip6.h>
-#include <csignal>
+
 
 #define ICMP_HEADER_LENGTH 8
 #define IPV4_HEADER_LENGTH 20
