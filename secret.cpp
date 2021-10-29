@@ -47,7 +47,7 @@ std::vector<char> encrypt_data(std::vector<char> data, int data_bytes)
     int padding_count = ((16 - data.size() % 16) % 16);
     if (padding_count != 0)
     {
-        padding_count += 16; // minimum of 16 bytes padding to minimize chance of wrong padding interpretation (zeroes and count of zeroes at end of packet data)
+        padding_count += 16; // minimum of 16 bytes padding to minimize chance of wrong padding interpretation
         data.resize(data.size() + padding_count - 1, 0);
         data.push_back(padding_count);
         encrypted_buffer.resize(encrypted_buffer.size() + padding_count, 0);
@@ -256,6 +256,10 @@ int send_icmp_packet(char *data, int socket_descriptor, int data_length, int pac
 int send_file_via_icmp(addrinfo *server_info, std::string filename)
 {
     std::ifstream source_file(filename, std::ios::in);
+    if(!source_file.good())
+    {
+        return EXIT_FAILURE;
+    }
     int socket_descriptor;
     int type;
     if (server_info->ai_family == AF_INET)
@@ -338,6 +342,11 @@ int main(int argc, char *argv[])
             break;
         }
     }
+     if ((file_arg == "" || host == "") && !listen_mode)
+     {
+         std::cerr << "-s and -r arguments are required in client mode" << std::endl;
+         return EXIT_FAILURE;
+     }
     if (listen_mode) // server
     {
         char *default_interface = get_default_interface();
